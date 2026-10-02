@@ -12,7 +12,7 @@
 # See the License for the specific language governing permissions and
 # limitations under the License.
 
-"""Internal JSON schema helpers for the generated common types models.
+"""Internal JSON schema helpers for the generated common types and catalog models.
 
 Some specification schemas use constructs Pydantic cannot derive from model
 fields: composition (`allOf`/`oneOf`) over other models, a reference to the
@@ -132,6 +132,29 @@ def inline_marked_defs(document: dict[str, Any]) -> dict[str, Any]:
     if not marked:
         return document
 
+    def _is_recursive(def_name: str, node: Any, path: frozenset[str]) -> bool:
+        if isinstance(node, list):
+            return any(_is_recursive(def_name, item, path) for item in node)
+        if isinstance(node, dict):
+            ref = node.get("$ref")
+            if isinstance(ref, str) and ref.startswith("#/$defs/"):
+                target = ref[len("#/$defs/") :]
+                if target == def_name:
+                    return True
+                if target in marked and target not in path:
+                    if _is_recursive(def_name, marked[target], path | {target}):
+                        return True
+            return any(_is_recursive(def_name, v, path) for v in node.values())
+        return False
+
+    recursive = {
+        name
+        for name, schema in marked.items()
+        if _is_recursive(name, schema, frozenset())
+    }
+    for name in recursive:
+        del marked[name]
+
     def inline(node: Any, visiting: frozenset[str]) -> Any:
         if isinstance(node, list):
             return [inline(item, visiting) for item in node]
@@ -142,7 +165,7 @@ def inline_marked_defs(document: dict[str, Any]) -> dict[str, Any]:
             name = ref[len("#/$defs/") :]
             if name in marked:
                 if name in visiting:
-                    raise ValueError(f"Cannot inline the recursive def '{name}'.")
+                    return node
                 siblings = {k: v for k, v in node.items() if k != "$ref"}
                 merged = {**marked[name], **siblings}
                 ordered = {k: merged[k] for k in _INLINED_KEYWORD_ORDER if k in merged}
@@ -153,7 +176,15 @@ def inline_marked_defs(document: dict[str, Any]) -> dict[str, Any]:
     result: dict[str, Any] = {
         k: inline(v, frozenset()) for k, v in document.items() if k != "$defs"
     }
-    kept = {name: schema for name, schema in defs.items() if name not in marked}
+    kept = {
+        name: (
+            {k: v for k, v in schema.items() if k != INLINE_DEF_MARKER}
+            if isinstance(schema, dict)
+            else schema
+        )
+        for name, schema in defs.items()
+        if name not in marked
+    }
     if kept:
         result["$defs"] = inline(kept, frozenset())
     return result
@@ -348,6 +379,24 @@ class ReturnType:
             call = call.model_copy()
             object.__setattr__(call, "return_type", self.expected)
         return call
+
+
+class SpecAllOf:
+    """Annotation that adds `allOf` members a type cannot express.
+
+    The type's schema becomes the first member of an `allOf` followed by
+    `schemas`, for example an `if`/`then` format rule. It documents the
+    specification and does not change validation.
+    """
+
+    def __init__(self, *schemas: dict[str, Any]) -> None:
+        self.schemas = schemas
+
+    def __get_pydantic_json_schema__(
+        self, schema: core_schema.CoreSchema, handler: GetJsonSchemaHandler
+    ) -> JsonSchemaValue:
+        json_schema = handler(schema)
+        return {"allOf": [json_schema, *copy.deepcopy(list(self.schemas))]}
 
 
 def is_identifier_key(key: str) -> bool:

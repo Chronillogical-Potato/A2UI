@@ -2,6 +2,9 @@
 
 ## Unreleased
 
+- **Deprecated:** `SchemaCatalog` is renamed `CatalogApi`, matching
+  `ComponentApi` and `FunctionApi`. `SchemaCatalog` stays as a deprecated alias
+  and will be removed in a later release.
 - Support reserved protocol key prefix (`@path`, `@call`) in `DataBinding` and `FunctionCall`, dynamic prefix doubling unescaping (`@@path` → `@path`) during dynamic evaluation, and `@path` in dynamic setter generation.
 - Lower SDK floor constraint to `">=3.5.0 <4.0.0"` (replacing post-3.5 null-aware collection element syntax with collection-if) to support Flutter 3.24+ and Dart 3.5+ environments.
 - Execute `functionCall` and `call` component actions locally in

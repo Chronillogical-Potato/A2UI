@@ -20,6 +20,7 @@ import yaml from 'js-yaml';
 import {MessageProcessor, STRICT_VALIDATION} from '../../dist/src/processing/message-processor.js';
 import {Catalog, createFunctionImplementation} from '../../dist/src/catalog/types.js';
 import {loadCatalogFromSchema} from '../../dist/src/catalog/schema_loader.js';
+import {PayloadValidator} from '../../dist/src/validation/index.js';
 import {DataModel} from '../../dist/src/state/data-model.js';
 import {SurfaceModel} from '../../dist/src/state/surface-model.js';
 import {SUPPORTED_PROTOCOL_VERSIONS} from '../../dist/src/processing/adapters/base.js';
@@ -141,7 +142,74 @@ const SKIP_TEST_NAMES = new Set([
  * then case name, with the behaviour that differs. They are reported as
  * skipped with that reason. An entry that matches no case fails the run.
  */
-const KNOWN_DIVERGENCES = new Map();
+const PUBLISHED_CATALOG_NOT_SELF_CONTAINED =
+  "the FunctionCall standard definition keeps its '$ref' to" +
+  " 'catalog.json#/$defs/anyFunction', so the generated catalog schema" +
+  ' points outside itself';
+const V10_PUBLISHED_CATALOG_NOT_SELF_CONTAINED =
+  "the generated catalog schema keeps a '#/$defs/Child' reference without" +
+  ' defining Child in its own $defs';
+const FUNCTION_CALL_EXTRA_KEY_ACCEPTED =
+  'the validator accepts a function call carrying a key its catalog function' +
+  ' definition does not declare';
+const KNOWN_DIVERGENCES = new Map([
+  [
+    'core/catalog.yaml',
+    new Map([
+      ['test_v09_published_basic_catalog_is_self_contained', PUBLISHED_CATALOG_NOT_SELF_CONTAINED],
+      [
+        'test_v09_published_minimal_catalog_is_self_contained',
+        PUBLISHED_CATALOG_NOT_SELF_CONTAINED,
+      ],
+      ['test_v091_published_basic_catalog_is_self_contained', PUBLISHED_CATALOG_NOT_SELF_CONTAINED],
+      [
+        'test_v10_published_basic_catalog_is_self_contained',
+        V10_PUBLISHED_CATALOG_NOT_SELF_CONTAINED,
+      ],
+      [
+        'test_v09_published_basic_catalog_rejects_function_call_extra_key',
+        FUNCTION_CALL_EXTRA_KEY_ACCEPTED,
+      ],
+      [
+        'test_v09_published_minimal_catalog_rejects_function_call_extra_key',
+        FUNCTION_CALL_EXTRA_KEY_ACCEPTED,
+      ],
+      [
+        'test_v091_published_basic_catalog_rejects_function_call_extra_key',
+        FUNCTION_CALL_EXTRA_KEY_ACCEPTED,
+      ],
+      [
+        'test_v10_published_basic_catalog_rejects_function_call_extra_key',
+        FUNCTION_CALL_EXTRA_KEY_ACCEPTED,
+      ],
+    ]),
+  ],
+  [
+    'core/message_processor_v1_0.yaml',
+    new Map([
+      [
+        'test_v10_create_surface_metadata_extension_key_must_be_identifier',
+        'the v1.0 CreateSurface schema does not yet enforce UAX #31 identifier syntax on metadata.extensions keys',
+      ],
+    ]),
+  ],
+]);
+
+/**
+ * The `expect` keys a `from_json` case may use (`FromJsonExpect` in
+ * conformance_schema.json). An unknown key fails the case rather than being
+ * silently ignored.
+ */
+const FROM_JSON_EXPECT_KEYS = new Set([
+  'catalogId',
+  'components',
+  'functions',
+  'invalidComponents',
+  'protocolVersion',
+  'selfContained',
+  'theme',
+  'validComponents',
+]);
 
 /** Suites that must be discovered and contain at least one case. */
 const REQUIRED_SUITES = new Set(['core/node_resolution.yaml']);
@@ -188,6 +256,8 @@ const UNIMPLEMENTED_ACTIONS = new Map([
   ['transform_catalog', 'catalog transformers are agent-side only'],
   ['provide_catalog', 'catalog providers are agent-side only'],
   ['resolve_catalogs', 'catalog resolution is agent-side only'],
+  ['common_types_schema', 'web_core does not generate the common types schema from its own models'],
+  ['validate_common_type', 'web_core has no per-definition validators for the common types'],
 ]);
 
 function findYamlFiles(dir) {
@@ -1008,8 +1078,40 @@ function validateAccessibilityCheckTestCase() {
   // not headless web_core state engines.
 }
 
+function collectRefs(node, refs = []) {
+  if (Array.isArray(node)) {
+    for (const item of node) collectRefs(item, refs);
+  } else if (node && typeof node === 'object') {
+    if (typeof node.$ref === 'string') refs.push(node.$ref);
+    for (const value of Object.values(node)) collectRefs(value, refs);
+  }
+  return refs;
+}
+
+/** Asserts that every `$ref` in the schema resolves within the schema. */
+function assertSelfContained(schema) {
+  const refs = collectRefs(schema);
+  assert.ok(refs.length > 0, 'Catalog schema contains no references at all.');
+  for (const ref of refs) {
+    assert.ok(ref.startsWith('#'), `Reference '${ref}' leaves the catalog document.`);
+    let target = schema;
+    for (const rawToken of ref.slice(1).split('/').slice(1)) {
+      const token = rawToken.replaceAll('~1', '/').replaceAll('~0', '~');
+      assert.ok(
+        target && typeof target === 'object' && Object.hasOwn(target, token),
+        `Reference '${ref}' does not resolve within the catalog document.`,
+      );
+      target = target[token];
+    }
+  }
+}
+
 function validateFromJsonTestCase(testCase) {
-  const rawSchema = testCase.catalogSchema || testCase.catalog || testCase.schema || testCase;
+  const rawSchema = testCase.catalogPath
+    ? JSON.parse(
+        fs.readFileSync(path.resolve(CONFORMANCE_ROOT, '../', testCase.catalogPath), 'utf8'),
+      )
+    : testCase.catalogSchema || testCase.catalog || testCase.schema || testCase;
   const cId =
     testCase.catalogId ||
     (rawSchema && typeof rawSchema === 'object'
@@ -1051,6 +1153,8 @@ function validateFromJsonTestCase(testCase) {
 
   if (testCase.expect) {
     const expected = testCase.expect;
+    const unknownKeys = Object.keys(expected).filter(key => !FROM_JSON_EXPECT_KEYS.has(key));
+    assert.deepStrictEqual(unknownKeys, [], `Unknown from_json expect keys: ${unknownKeys}`);
     if (expected.catalogId) {
       assert.strictEqual(catalog.id, expected.catalogId);
     }
@@ -1073,6 +1177,21 @@ function validateFromJsonTestCase(testCase) {
     if (expected.theme) {
       if (Object.keys(expected.theme).length > 0) {
         assert.ok(catalog.themeSchema, 'Expected catalog to have themeSchema');
+      }
+    }
+    if (expected.selfContained) {
+      assertSelfContained(catalog.catalogSchema);
+    }
+    if (expected.validComponents || expected.invalidComponents) {
+      const validator = new PayloadValidator(catalog, STRICT_VALIDATION);
+      for (const component of expected.validComponents ?? []) {
+        validator.validateComponent(component);
+      }
+      for (const component of expected.invalidComponents ?? []) {
+        assert.throws(
+          () => validator.validateComponent(component),
+          `Expected component to be rejected: ${JSON.stringify(component)}`,
+        );
       }
     }
   }

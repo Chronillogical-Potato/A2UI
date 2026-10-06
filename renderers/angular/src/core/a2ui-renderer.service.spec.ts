@@ -17,7 +17,7 @@
 import {Injectable} from '@angular/core';
 import {TestBed} from '@angular/core/testing';
 import {A2uiRendererService, A2UI_RENDERER_CONFIG, provideA2Ui} from './a2ui-renderer.service';
-import {BasicCatalog} from '../catalog/basic/basic-catalog';
+import {BasicCatalog} from '../basic-catalog';
 import {isWebComponentImplementation} from '@a2ui/web_core/v0_9/universal';
 import {getMarkdownRenderer, setMarkdownRenderer} from '@a2ui/web_core/v0_9/basic_catalog';
 import {MarkdownRenderer} from './markdown';
@@ -140,29 +140,37 @@ describe('A2uiRendererService', () => {
     });
   });
 
-  describe('processMessages', () => {
-    it('should delegate to MessageProcessor', () => {
-      // Access private _messageProcessor via bracket notation for testing if needed,
-      // or verify indirectly by inspecting surfaceGroup after messages.
-      // Since MessageProcessor is complex, we can just verify it doesn't crash
-      // and updates model if we pass valid messages.
-      // For a pure unit test, we might consider mocking MessageProcessor if it was injected,
-      // but it's instantiated via 'new'.
-      // Let's pass an empty array to verify delegate runs without error.
+  describe('processMessages and processor methods', () => {
+    it('should delegate processMessages to MessageProcessor', () => {
       expect(() => service.processMessages([])).not.toThrow();
+    });
+
+    it('should delegate processMessagesAsync to MessageProcessor', async () => {
+      const spy = spyOn(service.processor, 'processMessagesAsync').and.resolveTo();
+      await service.processMessagesAsync({version: 'v1.0', messages: []});
+      expect(spy).toHaveBeenCalledWith({version: 'v1.0', messages: []});
+    });
+
+    it('should delegate callAgentFunction to MessageProcessor', async () => {
+      const spy = spyOn(service.processor, 'callAgentFunction').and.resolveTo('ok');
+      const result = await service.callAgentFunction('surf1', 'myFn', {a: 1});
+      expect(result).toBe('ok');
+      expect(spy).toHaveBeenCalledWith('surf1', {call: 'myFn', args: {a: 1}} as any, undefined);
     });
   });
 
   describe('ngOnDestroy', () => {
-    it('should dispose surfaceGroup', () => {
-      const surfaceGroup = service.surfaceGroup;
-      expect(surfaceGroup).toBeDefined();
-
-      const disposeSpy = spyOn(surfaceGroup as any, 'dispose');
+    it('should dispose processor and surfaceGroup', () => {
+      const processorDisposeSpy = spyOn(service.processor, 'dispose').and.callThrough();
+      const surfaceGroupDisposeSpy = spyOn(
+        service.surfaceGroup as any,
+        'dispose',
+      ).and.callThrough();
 
       service.ngOnDestroy();
 
-      expect(disposeSpy).toHaveBeenCalled();
+      expect(processorDisposeSpy).toHaveBeenCalled();
+      expect(surfaceGroupDisposeSpy).toHaveBeenCalled();
     });
   });
 });

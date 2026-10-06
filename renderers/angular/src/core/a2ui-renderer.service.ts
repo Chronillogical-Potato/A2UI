@@ -26,9 +26,11 @@ import {
 } from '@angular/core';
 import {
   MessageProcessor,
+  MessageProcessorOptions,
+  ProcessableMessagePayload,
+  CallOptions,
   SurfaceGroupModel,
   ActionListener,
-  A2uiMessage,
 } from '@a2ui/web_core/v0_9';
 import {AngularComponentImplementation, AngularCatalog} from '../catalog/types';
 import {
@@ -59,6 +61,10 @@ export interface RendererConfiguration {
    * Optional handler for actions dispatched from any surface.
    */
   actionHandler?: ActionListener;
+  /**
+   * Optional configuration options for the underlying MessageProcessor.
+   */
+  processorOptions?: MessageProcessorOptions;
 }
 
 /**
@@ -88,7 +94,7 @@ export function provideA2Ui(
 }
 
 /**
- * Manages A2UI v0.9 rendering sessions by bridging the MessageProcessor to Angular.
+ * Manages A2UI rendering sessions by bridging the MessageProcessor to Angular.
  *
  * This service is the central entry point for the A2UI renderer. It maintains a
  * {@link MessageProcessor} that turns A2UI protocol messages into a reactive
@@ -119,18 +125,65 @@ export class A2uiRendererService implements OnDestroy {
     this._messageProcessor = new MessageProcessor<AngularComponentImplementation>(
       this._catalogs,
       this._config?.actionHandler,
+      this._config?.processorOptions,
     );
   }
 
   /**
-   * Processes a list of A2UI messages and updates the internal surface models.
+   * Processes a list or envelope of A2UI messages and updates the internal surface models.
    *
    * This should be called whenever new messages arrive from an agent or orchestrator.
    *
-   * @param messages The list of {@link A2uiMessage}s to process.
+   * @param messages The messages or envelope to process.
    */
-  processMessages(messages: A2uiMessage[]): void {
-    this._messageProcessor.processMessages(messages);
+  processMessages(
+    messages: unknown[] | ProcessableMessagePayload | Record<string, unknown> | any,
+  ): void {
+    this._messageProcessor.processMessages(messages as ProcessableMessagePayload);
+  }
+
+  /**
+   * Asynchronously processes a list or envelope of A2UI messages and awaits any pending
+   * function calls.
+   *
+   * @param messages The messages or envelope to process.
+   */
+  async processMessagesAsync(
+    messages: unknown[] | ProcessableMessagePayload | Record<string, unknown> | any,
+  ): Promise<void> {
+    await this._messageProcessor.processMessagesAsync(messages as ProcessableMessagePayload);
+  }
+
+  /**
+   * Calls an agent function on a specific surface and returns a promise for the result.
+   *
+   * @param surfaceId The target surface ID.
+   * @param call The function name or call descriptor.
+   * @param argsOrOptions Function arguments or call options.
+   * @param options Call options if arguments were provided.
+   */
+  callAgentFunction<TRes = unknown>(
+    surfaceId: string,
+    call: string | {call: string; args?: Record<string, unknown>; catalogId?: string},
+    argsOrOptions?: Record<string, unknown> | CallOptions,
+    options?: CallOptions,
+  ): Promise<TRes> {
+    if (typeof call === 'string') {
+      const fnCall = {call, args: argsOrOptions as Record<string, unknown> | undefined};
+      return this._messageProcessor.callAgentFunction<TRes>(surfaceId, fnCall as any, options);
+    }
+    return this._messageProcessor.callAgentFunction<TRes>(
+      surfaceId,
+      call as any,
+      argsOrOptions as CallOptions | undefined,
+    );
+  }
+
+  /**
+   * The underlying MessageProcessor instance.
+   */
+  get processor(): MessageProcessor<AngularComponentImplementation> {
+    return this._messageProcessor;
   }
 
   /**
@@ -150,6 +203,7 @@ export class A2uiRendererService implements OnDestroy {
   }
 
   ngOnDestroy(): void {
+    this._messageProcessor.dispose();
     this._messageProcessor.model.dispose();
     clearDefaultUniversalInjector(this._injector);
   }

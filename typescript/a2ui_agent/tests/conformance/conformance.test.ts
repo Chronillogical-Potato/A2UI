@@ -26,8 +26,9 @@ import {
   ResponsePart,
   resolveCatalogs,
 } from '../../src/index.js';
-import {V10RendererCapabilities} from '../../src/internal/web_core.js';
+import {STRICT_VALIDATION, V10RendererCapabilities} from '../../src/internal/web_core.js';
 import {DirectJsonParser} from '../../src/inference_formats/direct_json/parser.js';
+import {DirectJsonStreamProcessorImpl} from '../../src/inference_formats/direct_json/streaming.js';
 
 import {parseAndFix} from '../../src/parser/payload_fixer.js';
 import {loadBasicCatalog} from '../helpers/basic-catalogs.js';
@@ -208,6 +209,37 @@ describe('Conformance Harness', () => {
               }
               expect(found).toBe(true);
             }
+          }
+        }
+      } else if (action === 'process_chunk') {
+        const catalogConfig = testCase.catalog
+          ? await createCatalogConfig(testCase.catalog as Record<string, unknown>)
+          : undefined;
+        const catalog = catalogConfig?.catalog || basicCatalogV10;
+        const catalogObj = testCase.catalog as Record<string, unknown> | undefined;
+        const progressiveKeys = (catalogObj?.customCuttableKeys as string[] | undefined) ?? [
+          'text',
+          'literalString',
+        ];
+        const processor = new DirectJsonStreamProcessorImpl([catalog], {
+          progressiveKeys,
+          // The legacy suite's disableValidation predates ValidationConfig. Omitting the
+          // config turns validation off, as it does for web_core's MessageProcessor.
+          validationConfig: testCase.disableValidation ? undefined : STRICT_VALIDATION,
+        });
+
+        for (const step of testCase.steps as any[]) {
+          // As in Python's harness, a case-level expectError applies to every step, and a
+          // step with no expectation is an error in the suite rather than an unchecked step.
+          const expectError = step.expectError ?? testCase.expectError;
+          if (expectError) {
+            assertThrows(() => processor.processChunk(step.input), expectError);
+          } else if (step.expect !== undefined) {
+            const result = processor.processChunk(step.input);
+            const adapted = adaptParts(result);
+            expect(adapted).toEqual(step.expect);
+          } else {
+            throw new Error(`A step of ${name} has neither expect nor expectError`);
           }
         }
       } else if (action === 'skill') {

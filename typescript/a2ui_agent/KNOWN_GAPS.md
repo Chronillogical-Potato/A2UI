@@ -13,6 +13,20 @@ Most of these are deliberate scope boundaries rather than defects. However, a fe
 - **What it risks:** Callers who use the `Parser` directly rather than through the `A2uiRequestProcessor` facade will receive unvalidated payloads that might not adhere to the protocol schema, leading to unpredictable runtime errors downstream.
 - **Done looks like:** `compile` validates its output against the protocol schema and the parser's `catalogs`, which `DirectJsonFormat.createParser()` already passes in, before returning the payloads.
 
+### Stream processor resolves catalogs per surface, not per component
+
+- **What it is:** `DirectJsonStreamProcessorImpl` checks each component against the catalog its surface's `createSurface` names, or the first active catalog. It ignores a component's own `catalogId`, which v1.0 allows, so components from several catalogs on one surface are checked against the wrong catalog.
+- **Why it exists:** Python adds per-component resolution in #2967, which was still open when streaming landed. The TypeScript port waits for it so it can run that PR's conformance cases unchanged.
+- **What it risks:** On a mixed-catalog surface, a component from another catalog can be held back for missing required properties it doesn't have, or have its child references read with the wrong map.
+- **Done looks like:** A `resolveCatalog(comp)` lookup picks the catalog per component, and `test_v1_0_streaming_multi_catalog_resolution` and `test_v1_0_streaming_component_without_catalog_uses_surface_catalog` from `conformance/agent/legacy/streaming_parser.yaml` pass. Tracked in #3030.
+
+### Streamed payloads are not validated against catalogs
+
+- **What it is:** With a `ValidationConfig`, `DirectJsonStreamProcessorImpl` checks each completed envelope against the protocol schema and `allowedMessages`, but not against the active catalogs. A component type or property the catalog doesn't define passes through.
+- **Why it exists:** Catalog validation lives in `A2uiRequestProcessor`, and streaming isn't available through that facade yet. Callers construct the stream processor themselves.
+- **What it risks:** Streaming callers can forward components a renderer's catalog can't render.
+- **Done looks like:** The stream processor validates completed messages against the catalog each component resolves to, for example through web_core's `MessageProcessor`, or streaming moves behind `A2uiRequestProcessor` and is validated there. Whether to do this is decided in #3030.
+
 ### State leakage across requests (Sharp edge)
 
 - **What it is:** `A2uiRequestProcessor` holds a single `MessageProcessor` that accrues state across every `parseResponse` call.
@@ -34,12 +48,12 @@ Most of these are deliberate scope boundaries rather than defects. However, a fe
 - **What it risks:** Behaviour they pin can drift in this package without a failing test.
 - **Done looks like:** The harness runs every blueprint suite and stops reading `agent/legacy/`, which the conformance README keeps for the earlier agent interface.
 
-### `no-explicit-any` lint warning
+### `no-explicit-any` lint warnings
 
-- **What it is:** eslint reports one `no-explicit-any` warning, in `adaptParts` in `tests/conformance/conformance.test.ts`.
-- **Why it exists:** The harness builds the flat YAML part shape field by field.
+- **What it is:** There are 26 eslint warnings for `no-explicit-any` in the codebase.
+- **Why it exists:** These are heavily concentrated in the streaming healer (`streaming.ts`), where partial JSON chunks are genuinely untyped before being repaired and compiled.
 - **What it risks:** Mild technical debt.
-- **Done looks like:** `adaptParts` builds a typed object and the warning is gone.
+- **Done looks like:** The partial JSON trees are given a more rigorous generic recursive type, or `unknown` with runtime type guards, allowing the warnings to be cleanly resolved.
 
 ## 2. `web_core`
 
@@ -89,6 +103,13 @@ Most of these are deliberate scope boundaries rather than defects. However, a fe
 
 ## 4. Upstream Python & Conformance Suite
 
+### `v1.0` has a single canonical streaming case
+
+- **What it is:** `conformance/agent/legacy/streaming_parser.yaml` holds 41 `v0.9` streaming cases and one `v1.0` case. The `v1.0` streaming path is therefore covered by the `v0.9` cases, on the basis that the parser is version-independent in everything they exercise.
+- **Why it exists:** Upstream has not written a `v1.0` streaming suite. The local hand-translations that stood in for one have been retired, because 19 of their 20 cases duplicated a canonical `v0.9` case.
+- **What it risks:** Any streaming behaviour that differs between versions is untested. Today the known differences are small: the server-to-client file is named differently, and `v1.0` adds the `callRendererFunction` and `agentFunctionResponse` messages, which envelope validation accepts but no streaming case sends.
+- **Done looks like:** Upstream publishes `v1.0` streaming cases in `conformance/agent/`, and they run here.
+
 ### Python's `has_format_content` tests substrings
 
 - **What it is:** With `complete=True`, Python's `has_format_content` checks that the opening and closing tags each appear somewhere in the content, so `</a2ui-json> <a2ui-json>` counts as a complete block. TypeScript's `hasFormatContent` runs the block lexer and requires a closing tag after an opening one. Without `complete`, both return true for an opening tag on its own, as the module blueprint specifies. The conformance `has_parts` cases check the `complete` form, and both SDKs pass them.
@@ -102,3 +123,10 @@ Most of these are deliberate scope boundaries rather than defects. However, a fe
 - **Why it exists:** The TypeScript port started from the same regex. A review of this package pointed out the corruption, and only the TypeScript side was changed.
 - **What it risks:** For the same model output, the two SDKs can emit different string values. Conformance does not catch it: `test_compile_json_trailing_commas_removed` has no comma inside a string.
 - **Done looks like:** Python skips string literals as well, and a conformance case with a `,}` inside a string value pins the behaviour.
+
+### Python's partial data model parse cuts inside strings
+
+- **What it is:** While an `updateDataModel` message streams, Python's `_sniff_partial_data_model` in `direct_json/streaming.py` completes every open object on the brace stack and parses it. When a completed fragment doesn't parse, it cuts the fragment at its last comma with `rsplit(",", 1)` and tries again, including commas inside string values. TypeScript parses only the innermost open object that holds the `updateDataModel` key, and cuts only at commas outside strings.
+- **Why it exists:** The TypeScript port started from the same loop. A review of this package flagged the in-string cuts and the parse count, and only the TypeScript side was changed. Neither SDK was seen producing a wrong value, because later cuts are tried first and a cut inside a string only runs after they all fail.
+- **What it risks:** Python does several times more parsing per chunk. On a 64 KB, 200-item list streamed in 20-character chunks, the old TypeScript loop took 3.8 s and the new one 2.1 s; Python follows the old loop.
+- **Done looks like:** Python parses only the message fragment and cuts outside strings.

@@ -23,6 +23,20 @@
   listeners.
 - Validate `DataBinding`, `FunctionCall`, `Action`, and `ChildListTemplate` fields during JSON deserialization (`A2uiValidationError`), preserve `reservedKeys` (`@path`/`@call`) and `catalogId` across `toJson` (the `@call` form omits `returnType`, which the v1.0 schema does not declare), default `FunctionCall.returnType` to `A2uiReturnType.any`, treat a non-list `checks` value as no rules (as web_core and the Python core do) and guard dynamic map casts against `TypeError`, and throw `A2uiStateError` from `ComponentContext.childContext` and `A2uiCatalogError` from `CatalogInvokerExtension.invoke`.
 - Add `isValidUax31Identifier` and `assertUax31Identifier` for UAX #31 identifier validation, `A2uiErrorDetail`, `cause` chaining on `A2uiError` subclasses, and `code`/`path`/`errors` on `A2uiValidationError`. `A2uiError` now takes `code` as a named parameter, and `A2uiValidationError` aligns its default code to `'VALIDATION_FAILED'`.
+- Add `Catalog.refMap`, a cached `ComponentRefMap` of each component type's
+  child-reference properties. `MessageProcessor` graph validation and
+  `NodeResolver` both read it, so a property the validator checks is one the
+  resolver mounts. `ComponentRefMap`, `RefFields` and the `RefKind` types
+  (`SingleRef`, `ListRef`, `NestedRef`) are now exported.
+- Recognize v1.0 `common_types.json#/$defs/Child` (and `#/$defs/Child`) as a
+  single child reference, for dangling-reference and orphan checks and for
+  resolution.
+- **Behavior change:** `NodeResolver` now mounts an unmarked string `child`
+  and string-array `children`, which graph validation already checked.
+  Previously such a catalog validated but rendered its children as plain ids.
+- **Behavior change:** a dangling id inside a child list is reported with its
+  index (`children[2]` rather than `children`), and only an object with both a
+  string `componentId` and a string `path` is read as a `ChildList` template.
 - Added `ValidationResult` and `A2uiReturnType.validationResult` for structured
   client-side validation outcomes (`valid`, `message`, `code`, `severity`), and
   exposed `validationResults` alongside `isValid` and `validationErrors` on

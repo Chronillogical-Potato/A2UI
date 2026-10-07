@@ -18,30 +18,36 @@ import copy
 import json
 import logging
 import re
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
-from a2ui.parser.constants import *
-from a2ui.schema.constants import (
-    VERSION_0_9,
-    VERSION_0_8,
-    A2UI_OPEN_TAG,
-    A2UI_CLOSE_TAG,
-    SURFACE_ID_KEY,
-    CATALOG_COMPONENTS_KEY,
-)
-from a2ui.core.validation import analyze_topology
-from a2ui.parser.response_part import ResponsePart
-from a2ui.schema.schema_helper import CatalogSchemaHelper
-from a2ui.core.validation import (
+from a2ui.core import (
+    A2uiIntegrityError,
+    A2uiParseError,
+    A2uiRecursionError,
+    A2uiValidationError,
+    CatalogApi,
+    ComponentModel,
     RELAXED_VALIDATION,
     STRICT_VALIDATION,
-    SchemaValidator,
     ValidationConfig,
 )
-from a2ui.core import A2uiParseError, A2uiIntegrityError, A2uiValidationError
-
-if TYPE_CHECKING:
-    from a2ui.schema.catalog import A2uiCatalog
+from a2ui.core.validation import analyze_topology
+from a2ui.parser import ResponsePart
+from a2ui.parser.constants import (
+    MSG_TYPE_CREATE_SURFACE,
+    MSG_TYPE_SURFACE_UPDATE,
+    MSG_TYPE_UPDATE_COMPONENTS,
+)
+from a2ui.schema import (
+    A2UI_CLOSE_TAG,
+    A2UI_OPEN_TAG,
+    CATALOG_COMPONENTS_KEY,
+    VERSION_0_8,
+    VERSION_0_9,
+)
+from a2ui.schema.constants import DEFAULT_PROGRESSIVE_KEYS, SURFACE_ID_KEY
+from a2ui.schema.schema_helper import CatalogSchemaHelper
+from a2ui.utils import validate_payload
 
 logger = logging.getLogger(__name__)
 
@@ -53,26 +59,48 @@ class DirectJsonStreamParser:
     (V08 or V09) depending on the catalog version.
     """
 
-    def __new__(cls, catalog: A2uiCatalog) -> DirectJsonStreamParser:
+    def __new__(
+        cls,
+        catalog: CatalogApi,
+        *,
+        progressive_keys: frozenset[str] = DEFAULT_PROGRESSIVE_KEYS,
+    ) -> DirectJsonStreamParser:
         if cls is DirectJsonStreamParser:
-            version = catalog.version
+            version = str(catalog.protocol_version).removeprefix("v")
             # Lazy import inside __new__ to prevent circular import errors, as the
             # version-specific subclass modules import DirectJsonStreamParser from this module.
             if version == VERSION_0_8:
                 from .streaming_v08 import DirectJsonStreamParserV08
 
-                return DirectJsonStreamParserV08(catalog=catalog)
+                return DirectJsonStreamParserV08(
+                    catalog=catalog,
+                    progressive_keys=progressive_keys,
+                )
             else:
                 from .streaming_v09 import DirectJsonStreamParserV09
 
-                return DirectJsonStreamParserV09(catalog=catalog)
+                return DirectJsonStreamParserV09(
+                    catalog=catalog,
+                    progressive_keys=progressive_keys,
+                )
         return super().__new__(cls)
 
-    def __init__(self, catalog: A2uiCatalog):
+    def __init__(
+        self,
+        catalog: CatalogApi,
+        *,
+        progressive_keys: frozenset[str] = DEFAULT_PROGRESSIVE_KEYS,
+    ):
+        """Initializes the streaming parser.
+
+        Args:
+            catalog: The catalog that components are parsed and validated against.
+            progressive_keys: Keys whose string values can be safely auto-closed
+                (healed) when cut in the stream. An empty set turns healing off.
+        """
         self._catalog = catalog
-        self._validator = getattr(catalog, "validator", None)
-        self._version = catalog.version
-        self._cuttable_keys = catalog.cuttable_keys
+        self._version = str(catalog.protocol_version).removeprefix("v")
+        self._progressive_keys = frozenset(progressive_keys)
         self._schema_helper = CatalogSchemaHelper(catalog)
 
         self._found_delimiter = False
@@ -215,10 +243,6 @@ class DirectJsonStreamParser:
         """Provides access to version-specific yielded surfaces set."""
         raise NotImplementedError("Subclasses must implement _yielded_surfaces_set")
 
-    def is_protocol_msg(self, obj: dict[str, Any]) -> bool:
-        """Checks if the object is a recognized A2UI message for this version."""
-        raise NotImplementedError("Subclasses must implement is_protocol_msg")
-
     @property
     def _data_model_msg_type(self) -> str:
         """Returns the message type identifier for data model updates."""
@@ -242,75 +266,42 @@ class DirectJsonStreamParser:
         """Returns True if message should be yielded, False if skipped."""
         return True
 
-    def _get_s2c_validator(self) -> Any:
-        if not hasattr(self, "_s2c_validator_cached"):
-            if not self._catalog.s2c_schema:
-                self._s2c_validator_cached = None
-            else:
-                from referencing import Registry, Resource
-                import referencing.jsonschema
+    def _validate_message(self, message: dict[str, Any]) -> None:
+        """Checks a message the way a renderer holding the catalog would.
 
-                registry = Registry()
-                ver = f"v{self._version.removeprefix('v')}"
-                if self._catalog.common_types_schema:
-                    res_ct = Resource.from_contents(
-                        self._catalog.common_types_schema,
-                        default_specification=referencing.jsonschema.DRAFT202012,
-                    )
-                    registry = (
-                        registry.with_resource("common_types.json", res_ct)
-                        .with_resource(
-                            f"https://a2ui.org/specification/{ver}/common_types.json",
-                            res_ct,
-                        )
-                        .with_resource(
-                            "https://a2ui.org/specification/v0_9/common_types.json",
-                            res_ct,
-                        )
-                        .with_resource(
-                            "https://a2ui.org/specification/v0_8/common_types.json",
-                            res_ct,
-                        )
-                    )
-                if self._catalog.catalog_schema:
-                    import copy
+        The check runs the message through a `MessageProcessor` that holds the
+        catalog, using `validate_payload`.
 
-                    cat_schema_to_register = copy.deepcopy(
-                        dict(self._catalog.catalog_schema)
-                    )
-                    if "components" in cat_schema_to_register:
-                        defs = cat_schema_to_register.setdefault("$defs", {})
-                        if "anyComponent" not in defs:
-                            defs["anyComponent"] = {
-                                "oneOf": [
-                                    {"$ref": f"#/components/{comp_name}"}
-                                    for comp_name in cat_schema_to_register[
-                                        "components"
-                                    ]
-                                ]
-                            }
-                    res_cat = Resource.from_contents(
-                        cat_schema_to_register,
-                        default_specification=referencing.jsonschema.DRAFT202012,
-                    )
-                    registry = (
-                        registry.with_resource("catalog.json", res_cat)
-                        .with_resource(
-                            f"https://a2ui.org/specification/{ver}/catalog.json",
-                            res_cat,
-                        )
-                        .with_resource(
-                            "https://a2ui.org/specification/v0_9/catalog.json", res_cat
-                        )
-                        .with_resource(
-                            "https://a2ui.org/specification/v0_8/catalog.json", res_cat
-                        )
-                    )
-                self._s2c_validator_cached = SchemaValidator(
-                    self._catalog.s2c_schema,
-                    registry=registry,
-                )
-        return self._s2c_validator_cached
+        Raises:
+            A2uiValidationError: If a renderer would reject the message, or a
+                subclass such as `A2uiIntegrityError`, whose type is kept.
+        """
+        try:
+            validate_payload([self._catalog], message)
+        except A2uiRecursionError:
+            raise
+        except A2uiValidationError as e:
+            raise type(e)(f"Validation failed: {e}", details=e.details) from e
+
+    def _validate_components(
+        self,
+        comp_models: dict[str, ComponentModel],
+        available_reachable: set[str],
+    ) -> None:
+        """Validates reachable components against the catalog."""
+        all_errors = []
+        for cid in available_reachable:
+            comp_m = comp_models.get(cid)
+            if comp_m:
+                try:
+                    comp_m.validate(config=STRICT_VALIDATION)
+                except A2uiValidationError as e:
+                    all_errors.extend(e.details)
+        if all_errors:
+            raise A2uiValidationError(
+                f"Validation failed: {[detail.message for detail in all_errors]}",
+                details=all_errors,
+            )
 
     def _yield_messages(
         self,
@@ -323,22 +314,8 @@ class DirectJsonStreamParser:
             if not self._deduplicate_data_model(m):
                 continue
 
-            if self._validator:
-                if not self.is_protocol_msg(m):
-                    raise A2uiValidationError(
-                        f"Validation failed: Invalid message payload {m}"
-                    )
-                if config == STRICT_VALIDATION:
-                    v = self._get_s2c_validator()
-                    if v:
-                        from jsonschema.exceptions import best_match
-
-                        errors = list(v.iter_errors(m))
-                        if errors:
-                            err = best_match(errors) or errors[0]
-                            raise A2uiValidationError(
-                                f"Validation failed: {err.message}"
-                            )
+            if config == STRICT_VALIDATION:
+                self._validate_message(m)
 
             # Consolidated appending logic
             if messages and messages[-1].a2ui_json is None:
@@ -513,13 +490,13 @@ class DirectJsonStreamParser:
 
         # 1. Close open strings (healing)
         if in_string:
-            # We only auto-close strings for safe keys (CUTTABLE_KEYS)
+            # We only auto-close strings for safe keys (progressive keys)
             prefix = fixed[:last_quote_idx].rstrip()
             if prefix.endswith(":"):
                 key_match = re.findall(r'"([^"]+)"\s*:\s*$', prefix)
                 if key_match:
                     key = key_match[0]
-                    if key not in self._cuttable_keys:
+                    if key not in self._progressive_keys:
                         return ""
 
                     # Special case: don't cut URL bindings, as partial URLs break images/links
@@ -632,25 +609,20 @@ class DirectJsonStreamParser:
                                             " protocol check follows..."
                                         )
 
-                                        is_protocol = (
-                                            self._in_top_level_list
-                                            and self.is_protocol_msg(obj)
-                                        )
                                         is_comp = obj.get("id") and obj.get("component")
-                                        # Process objects at top-level OR items in top-level list
-                                        # When in a list, we are top-level if the ONLY thing on the stack is the list opener
+                                        # Process objects at top-level OR items in top-level list(s)
+                                        # When in a list, we are top-level if everything on the stack is a list opener
+                                        in_list_only = bool(self._brace_stack) and all(
+                                            b_t == "[" for b_t, _ in self._brace_stack
+                                        )
                                         is_top_level = (
                                             len(self._brace_stack) == 0
-                                        ) or (
-                                            self._in_top_level_list
-                                            and len(self._brace_stack) == 1
-                                            and self._brace_stack[0][0] == "["
-                                        )
+                                        ) or (self._in_top_level_list and in_list_only)
                                         if is_comp:
                                             self._handle_partial_component(
                                                 obj, messages
                                             )
-                                        elif is_top_level or is_protocol:
+                                        elif is_top_level:
                                             if not self._handle_complete_object(
                                                 obj, self.surface_id, messages
                                             ):
@@ -658,14 +630,10 @@ class DirectJsonStreamParser:
                                                 self._yield_messages([obj], messages)
 
                                         if self._brace_count == 0 or (
-                                            self._in_top_level_list
-                                            and len(self._brace_stack) == 1
+                                            self._in_top_level_list and in_list_only
                                         ):
                                             # Aggressively clear processed objects from the buffer to prevent slowdown.
-                                            if (
-                                                len(self._brace_stack) == 1
-                                                and self._brace_stack[0][0] == "["
-                                            ):
+                                            if in_list_only:
                                                 # Keep '[' and remove the object after it
                                                 self._json_buffer = (
                                                     self._json_buffer[:start_idx]
@@ -1015,8 +983,6 @@ class DirectJsonStreamParser:
 
         try:
             # Construct ComponentModels for topology analysis
-            from a2ui.core import ComponentModel
-
             comp_models: dict[str, ComponentModel] = {}
             for cid, cdef in self._seen_components.items():
                 c_component = cdef.get("component")
@@ -1036,7 +1002,7 @@ class DirectJsonStreamParser:
                 comp_models[cid] = ComponentModel(
                     cid,
                     c_type,
-                    getattr(self._catalog, "core_catalog", None),
+                    self._catalog,
                     props,
                 )
 
@@ -1096,21 +1062,8 @@ class DirectJsonStreamParser:
                     _collect_tree(root, complete_nodes)
                 available_reachable = complete_nodes
 
-            if check_root and self._validator:
-                all_errors = []
-                for cid in available_reachable:
-                    comp_m = comp_models.get(cid)
-                    if comp_m:
-                        try:
-                            comp_m.validate(config=STRICT_VALIDATION)
-                        except A2uiValidationError as e:
-                            all_errors.extend(e.details)
-                if all_errors:
-                    raise A2uiValidationError(
-                        "Validation failed:"
-                        f" {[detail.message for detail in all_errors]}",
-                        details=all_errors,
-                    )
+            if check_root:
+                self._validate_components(comp_models, available_reachable)
 
             # 1. Process placeholders and partial children
             processed_components: list[dict[str, Any]] = []
@@ -1335,13 +1288,13 @@ class DirectJsonStreamParser:
         """
         child_fields: set[str] = set()
         comp_type = obj.get("component")
-        core_cat = getattr(self._catalog, "core_catalog", self._catalog)
-        if core_cat and comp_type and hasattr(core_cat, "reference_map"):
-            if comp_type in core_cat.reference_map:
-                ref_spec = core_cat.reference_map[comp_type]
-                child_fields.update(ref_spec.single_child_props)
-                child_fields.update(ref_spec.list_child_props)
-                child_fields.update(ref_spec.nested_child_slots.keys())
+        ref_map = self._catalog.component_ref_map
+        if isinstance(comp_type, str) and comp_type in ref_map:
+            ref_spec = ref_map[comp_type]
+            child_fields.update(ref_spec.single_refs)
+            child_fields.update(ref_spec.list_refs)
+            child_fields.update(ref_spec.nested_refs.keys())
+            if child_fields:
                 return child_fields
 
         from a2ui.core.state import is_v0_8_heuristic_child_prop_key

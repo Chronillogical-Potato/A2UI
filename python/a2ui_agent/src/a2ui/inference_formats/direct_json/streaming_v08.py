@@ -15,23 +15,35 @@
 from __future__ import annotations
 
 import re
-from typing import Any, TYPE_CHECKING
+from typing import Any
 
+from a2ui.core import CatalogApi, RELAXED_VALIDATION
 from a2ui.inference_formats.direct_json.streaming import DirectJsonStreamParser
-from a2ui.parser.response_part import ResponsePart
-from a2ui.parser.constants import *
-from a2ui.schema.constants import SURFACE_ID_KEY, CATALOG_COMPONENTS_KEY
-from a2ui.core.validation import RELAXED_VALIDATION
-
-if TYPE_CHECKING:
-    from a2ui.schema.catalog import A2uiCatalog
+from a2ui.parser import ResponsePart
+from a2ui.parser.constants import (
+    DEFAULT_ROOT_ID,
+    MSG_TYPE_BEGIN_RENDERING,
+    MSG_TYPE_DATA_MODEL_UPDATE,
+    MSG_TYPE_DELETE_SURFACE,
+    MSG_TYPE_SURFACE_UPDATE,
+)
+from a2ui.schema import CATALOG_COMPONENTS_KEY
+from a2ui.schema.constants import DEFAULT_PROGRESSIVE_KEYS, SURFACE_ID_KEY
 
 
 class DirectJsonStreamParserV08(DirectJsonStreamParser):
     """Streaming parser implementation for A2UI v0.8 specification."""
 
-    def __init__(self, catalog: A2uiCatalog):
-        super().__init__(catalog=catalog)
+    def __init__(
+        self,
+        catalog: CatalogApi,
+        *,
+        progressive_keys: frozenset[str] = DEFAULT_PROGRESSIVE_KEYS,
+    ):
+        super().__init__(
+            catalog=catalog,
+            progressive_keys=progressive_keys,
+        )
         self._yielded_begin_rendering_surfaces: set[str] = set()
 
     @property
@@ -49,18 +61,6 @@ class DirectJsonStreamParserV08(DirectJsonStreamParser):
     def _yielded_surfaces_set(self) -> set[str]:
         """Provides access to version-specific yielded surfaces set."""
         return self._yielded_begin_rendering_surfaces
-
-    def is_protocol_msg(self, obj: dict[str, Any]) -> bool:
-        """Checks if the object is a recognized v0.8 message."""
-        return any(
-            k in obj
-            for k in (
-                MSG_TYPE_BEGIN_RENDERING,
-                MSG_TYPE_SURFACE_UPDATE,
-                MSG_TYPE_DATA_MODEL_UPDATE,
-                MSG_TYPE_DELETE_SURFACE,
-            )
-        )
 
     @property
     def _data_model_msg_type(self) -> str:
@@ -105,7 +105,7 @@ class DirectJsonStreamParserV08(DirectJsonStreamParser):
         if not isinstance(obj, dict):
             return False
 
-        # TODO: Leverage MessageProcessor to validate the json data.
+        self._validate_message(obj)
 
         # Update state based on the message content
         surface_id = obj.get(SURFACE_ID_KEY, self.surface_id)
@@ -153,7 +153,7 @@ class DirectJsonStreamParserV08(DirectJsonStreamParser):
 
             # Yield beginRendering immediately when it completes
             if sid not in self._yielded_start_messages:
-                self._yield_messages([obj], messages)
+                self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
                 self._yielded_start_messages.add(sid)
                 self._yielded_surfaces_set.add(sid)
                 self._buffered_start_message = None
@@ -178,16 +178,16 @@ class DirectJsonStreamParserV08(DirectJsonStreamParser):
         if MSG_TYPE_DATA_MODEL_UPDATE in obj:
             self.add_msg_type(MSG_TYPE_DATA_MODEL_UPDATE)
             self.update_data_model(obj[MSG_TYPE_DATA_MODEL_UPDATE], messages)
-            self._yield_messages([obj], messages)
+            self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
             self.yield_reachable(messages, check_root=False, raise_on_orphans=False)
             return True
 
         if MSG_TYPE_DELETE_SURFACE in obj:
-            self._yield_messages([obj], messages)
+            self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
             return True
 
         # If unknown, let base class yield it or yield it here
-        self._yield_messages([obj], messages)
+        self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
         return True
 
     def _construct_partial_message(

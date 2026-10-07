@@ -13,110 +13,26 @@
 # limitations under the License.
 
 import copy
+
 import pytest
 
-pytestmark = pytest.mark.skip(
-    reason="TODO: validation package was removed from a2ui_agent library"
-)
-from a2ui.schema.constants import (
-    A2UI_OPEN_TAG,
-    A2UI_CLOSE_TAG,
-    VERSION_0_8,
-    CATALOG_COMPONENTS_KEY,
-)
+from a2ui.core import Catalog
+from a2ui.inference_formats.direct_json import DirectJsonStreamParser
+from a2ui.parser import ResponsePart
 from a2ui.parser.constants import (
-    MSG_TYPE_SURFACE_UPDATE,
     MSG_TYPE_BEGIN_RENDERING,
+    MSG_TYPE_SURFACE_UPDATE,
 )
-from a2ui.schema.catalog import A2uiCatalog
-from a2ui.inference_formats.direct_json.streaming import DirectJsonStreamParser
-from a2ui.parser.response_part import ResponsePart
+from a2ui.schema import (
+    A2UI_CLOSE_TAG,
+    A2UI_OPEN_TAG,
+    CATALOG_COMPONENTS_KEY,
+    VERSION_0_8,
+)
 
 
 @pytest.fixture
 def mock_catalog():
-    s2c_schema = {
-        "title": "A2UI Message Schema",
-        "type": "object",
-        "additionalProperties": False,
-        "properties": {
-            "beginRendering": {
-                "type": "object",
-                "properties": {
-                    "surfaceId": {"type": "string"},
-                    "root": {"type": "string"},
-                },
-                "required": ["surfaceId", "root"],
-            },
-            "surfaceUpdate": {
-                "type": "object",
-                "properties": {
-                    "surfaceId": {
-                        "type": "string",
-                    },
-                    "components": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "id": {
-                                    "type": "string",
-                                },
-                                "component": {
-                                    "type": "object",
-                                    "additionalProperties": True,
-                                },
-                            },
-                            "required": ["id", "component"],
-                        },
-                    },
-                },
-                "required": ["surfaceId", "components"],
-            },
-            "dataModelUpdate": {
-                "type": "object",
-                "properties": {
-                    "surfaceId": {"type": "string"},
-                    "contents": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "key": {"type": "string"},
-                                "valueString": {"type": "string"},
-                                "valueNumber": {"type": "number"},
-                                "valueBoolean": {"type": "boolean"},
-                                "valueMap": {
-                                    "type": "array",
-                                    "items": {
-                                        "type": "object",
-                                        "properties": {
-                                            "key": {"type": "string"},
-                                            "valueString": {"type": "string"},
-                                            "valueNumber": {"type": "number"},
-                                            "valueBoolean": {"type": "boolean"},
-                                        },
-                                        "required": ["key"],
-                                    },
-                                },
-                            },
-                            "required": ["key"],
-                        },
-                    },
-                },
-                "required": ["surfaceId", "contents"],
-            },
-            "deleteSurface": {
-                "type": "object",
-                "properties": {
-                    "surfaceId": {
-                        "type": "string",
-                    }
-                },
-                "required": ["surfaceId"],
-            },
-        },
-    }
     catalog_schema = {
         "catalogId": "test_catalog",
         "components": {
@@ -189,17 +105,10 @@ def mock_catalog():
             },
         },
     }
-    common_types_schema = {
-        "$id": "https://a2ui.org/specification/v0_8/common_types.json",
-        "type": "object",
-        "$defs": {},
-    }
-    return A2uiCatalog(
-        version=VERSION_0_8,
-        name="test_catalog",
-        s2c_schema=s2c_schema,
-        common_types_schema=common_types_schema,
+    return Catalog.from_json(
         catalog_schema=catalog_schema,
+        protocol_version=VERSION_0_8,
+        catalog_id="test_catalog",
     )
 
 
@@ -278,8 +187,6 @@ def test_streaming_msg_type_deduplication(mock_catalog):
 def test_v08_path_heuristic_adds_slash(mock_catalog):
     """Tests that v0.8 adds a leading slash to relative paths."""
     parser = DirectJsonStreamParser(catalog=mock_catalog)
-    # Disable validation for simplicity
-    parser._validator = None
 
     # 1. Send beginRendering first to avoid buffering
     chunk_br = (
@@ -306,3 +213,25 @@ def test_v08_path_heuristic_adds_slash(mock_catalog):
     assert len(messages) > 0
     comp = messages[0][MSG_TYPE_SURFACE_UPDATE]["components"][0]
     assert comp["component"]["Text"]["text"]["path"] == "/some/relative/path"
+
+
+def test_v08_surface_update_validates_envelope(mock_catalog):
+    """Tests that a complete v0.8 surfaceUpdate validates its message envelope."""
+    from a2ui.core import A2uiValidationError
+
+    parser = DirectJsonStreamParser(catalog=mock_catalog)
+    chunk_br = (
+        A2UI_OPEN_TAG
+        + '[{"beginRendering": {"surfaceId": "s1", "root": "root"}}]'
+        + A2UI_CLOSE_TAG
+    )
+    list(parser.process_chunk(chunk_br))
+
+    chunk_su = (
+        A2UI_OPEN_TAG
+        + '[{"surfaceUpdate": {"surfaceId": "s1", "extra": 1, "components":'
+        ' [{"id": "root", "component": {"Text": {"text": "hi"}}}]}}]'
+        + A2UI_CLOSE_TAG
+    )
+    with pytest.raises(A2uiValidationError):
+        list(parser.process_chunk(chunk_su))

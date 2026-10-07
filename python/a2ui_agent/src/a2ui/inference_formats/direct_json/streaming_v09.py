@@ -14,26 +14,37 @@
 
 from __future__ import annotations
 
-import re
 import json
-from typing import Any, TYPE_CHECKING
+import re
+from typing import Any
 
+from a2ui.core import CatalogApi, RELAXED_VALIDATION
 from a2ui.inference_formats.direct_json.streaming import DirectJsonStreamParser
-from a2ui.parser.response_part import ResponsePart
-from a2ui.parser.constants import *
-from a2ui.schema.constants import SURFACE_ID_KEY, CATALOG_COMPONENTS_KEY
-from a2ui.core.validation import RELAXED_VALIDATION
-from a2ui.core import A2uiValidationError
-
-if TYPE_CHECKING:
-    from a2ui.schema.catalog import A2uiCatalog
+from a2ui.parser import ResponsePart
+from a2ui.parser.constants import (
+    DEFAULT_ROOT_ID,
+    MSG_TYPE_CREATE_SURFACE,
+    MSG_TYPE_DELETE_SURFACE,
+    MSG_TYPE_UPDATE_COMPONENTS,
+    MSG_TYPE_UPDATE_DATA_MODEL,
+)
+from a2ui.schema import CATALOG_COMPONENTS_KEY
+from a2ui.schema.constants import DEFAULT_PROGRESSIVE_KEYS, SURFACE_ID_KEY
 
 
 class DirectJsonStreamParserV09(DirectJsonStreamParser):
     """Streaming parser implementation for A2UI v0.9 specification."""
 
-    def __init__(self, catalog: A2uiCatalog):
-        super().__init__(catalog=catalog)
+    def __init__(
+        self,
+        catalog: CatalogApi,
+        *,
+        progressive_keys: frozenset[str] = DEFAULT_PROGRESSIVE_KEYS,
+    ):
+        super().__init__(
+            catalog=catalog,
+            progressive_keys=progressive_keys,
+        )
         # v0.9 default root is "root"
         self._default_root_id = DEFAULT_ROOT_ID
 
@@ -49,18 +60,6 @@ class DirectJsonStreamParserV09(DirectJsonStreamParser):
     def _data_model_msg_type(self) -> str:
         """Returns the message type identifier for data model updates."""
         return MSG_TYPE_UPDATE_DATA_MODEL
-
-    def is_protocol_msg(self, obj: dict[str, Any]) -> bool:
-        """Checks if the object is a recognized v0.9 message."""
-        return any(
-            k in obj
-            for k in (
-                MSG_TYPE_CREATE_SURFACE,
-                MSG_TYPE_UPDATE_COMPONENTS,
-                MSG_TYPE_UPDATE_DATA_MODEL,
-                MSG_TYPE_DELETE_SURFACE,
-            )
-        )
 
     def _sniff_metadata(self) -> None:
         """Sniffs for v0.9 metadata in the json_buffer."""
@@ -98,15 +97,7 @@ class DirectJsonStreamParserV09(DirectJsonStreamParser):
         if not isinstance(obj, dict):
             return False
 
-        if self._validator:
-            v = self._get_s2c_validator()
-            if v:
-                from jsonschema.exceptions import best_match
-
-                errors = list(v.iter_errors(obj))
-                if errors:
-                    err = best_match(errors) or errors[0]
-                    raise A2uiValidationError(f'Validation failed: {err.message}')
+        self._validate_message(obj)
 
         # Update state based on the message content
         surface_id = obj.get(SURFACE_ID_KEY, self.surface_id)
@@ -132,7 +123,7 @@ class DirectJsonStreamParserV09(DirectJsonStreamParser):
 
             # Yield createSurface immediately when it completes
             if sid not in self._yielded_start_messages:
-                self._yield_messages([obj], messages)
+                self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
                 self._yielded_start_messages.add(sid)
                 self._yielded_surfaces_set.add(sid)
                 self._buffered_start_message = None
@@ -161,14 +152,14 @@ class DirectJsonStreamParserV09(DirectJsonStreamParser):
                 self._pending_messages.setdefault(sid, []).append(obj)
                 return True
             self.add_msg_type(MSG_TYPE_DELETE_SURFACE)
-            self._yield_messages([obj], messages)
+            self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
             return True
 
         if MSG_TYPE_UPDATE_DATA_MODEL in obj:
 
             self.add_msg_type(MSG_TYPE_UPDATE_DATA_MODEL)
             self.update_data_model(obj[MSG_TYPE_UPDATE_DATA_MODEL], messages)
-            self._yield_messages([obj], messages)
+            self._yield_messages([obj], messages, config=RELAXED_VALIDATION)
             return True
 
         return False
@@ -263,7 +254,7 @@ class DirectJsonStreamParserV09(DirectJsonStreamParser):
         }
         if self.surface_id:
             payload[SURFACE_ID_KEY] = self.surface_id
-        version = getattr(self._catalog, 'version', None) or 'v0.9'
+        version = getattr(self._catalog, 'protocol_version', None) or 'v0.9'
         if not str(version).startswith('v'):
             version = f'v{version}'
         return {'version': version, MSG_TYPE_UPDATE_COMPONENTS: payload}

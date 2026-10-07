@@ -14,6 +14,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 import re
 from typing import Any
 
@@ -31,17 +32,33 @@ from a2ui.schema import CATALOG_COMPONENTS_KEY
 from a2ui.schema.constants import DEFAULT_PROGRESSIVE_KEYS, SURFACE_ID_KEY
 
 
-class DirectJsonStreamParserV08(DirectJsonStreamParser):
-    """Streaming parser implementation for A2UI v0.8 specification."""
+class DirectJsonStreamParserV08Legacy(DirectJsonStreamParser):
+    """Streaming parser implementation for the legacy A2UI v0.8 specification."""
 
     def __init__(
         self,
-        catalog: CatalogApi,
+        catalogs: Sequence[CatalogApi],
         *,
         progressive_keys: frozenset[str] = DEFAULT_PROGRESSIVE_KEYS,
     ):
+        """Initializes the v0.8 streaming parser.
+
+        `DirectJsonStreamParser(catalogs)` builds this parser for v0.8 and then
+        runs its `__init__` with the same arguments, so it takes the same
+        sequence as the other parsers.
+
+        Args:
+            catalogs: The catalogs that components are parsed and validated
+                against.
+            progressive_keys: Keys whose string values can be safely auto-closed
+                (healed) when cut in the stream. An empty set turns healing off.
+
+        Raises:
+            A2uiCatalogError: If no catalog is given, or the catalogs target
+                different protocol versions.
+        """
         super().__init__(
-            catalog=catalog,
+            catalogs=catalogs,
             progressive_keys=progressive_keys,
         )
         self._yielded_begin_rendering_surfaces: set[str] = set()
@@ -130,6 +147,10 @@ class DirectJsonStreamParserV08(DirectJsonStreamParser):
         if MSG_TYPE_DELETE_SURFACE in obj:
             if sid in self._yielded_surfaces_set or self._buffered_start_message:
                 self._delete_surface(sid)
+        else:
+            # v0.8 has no createSurface, so any other message for a deleted
+            # surface starts it over.
+            self._deleted_surfaces.discard(sid)
 
         if sid in self._deleted_surfaces:
             return True
@@ -148,6 +169,7 @@ class DirectJsonStreamParserV08(DirectJsonStreamParser):
             br_val = obj[MSG_TYPE_BEGIN_RENDERING]
             if isinstance(br_val, dict):
                 self.surface_id = br_val.get(SURFACE_ID_KEY, self.surface_id)
+                self._record_surface_catalog(sid, br_val)
             self.root_id = br_val.get('root', self.root_id or DEFAULT_ROOT_ID)
             self._buffered_start_message = obj
 

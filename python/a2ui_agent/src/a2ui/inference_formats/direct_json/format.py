@@ -45,7 +45,8 @@ class DirectJsonFormat(InferenceFormat):
 
         Args:
             catalogs: The active catalogs. The prompt describes all of them, and
-              the parsers validate against the first one.
+              the parsers hold all of them and resolve each component against
+              the catalog that it or its surface names.
             examples_path: Optional directory or glob pattern of few-shot example
               files, which `a2ui.schema.load_examples` reads.
             progressive_keys: Keys whose string values the stream parsers heal
@@ -81,7 +82,7 @@ class DirectJsonFormat(InferenceFormat):
         """The parser instance configured for this Direct JSON format."""
         if self._parser is None:
             self._parser = DirectJsonParser(
-                self._catalogs[0],
+                self._catalogs,
                 progressive_keys=self._progressive_keys,
             )
         return self._parser
@@ -96,22 +97,16 @@ class DirectJsonFormat(InferenceFormat):
         """The directory or glob pattern of few-shot example files, if any."""
         return self._examples_path
 
-    def create_stream_parser(
-        self, catalog: CatalogApi | None = None
-    ) -> DirectJsonStreamParser:
+    def create_stream_parser(self) -> DirectJsonStreamParser:
         """Creates a streaming parser configured by this format.
 
         The parser heals this format's progressive keys and checks each
-        message the way a renderer holding the catalog would.
-
-        Args:
-            catalog: The catalog to parse against. Defaults to the first
-                catalog.
+        message the way a renderer holding the catalogs would.
 
         Returns:
             A new streaming parser.
         """
         return DirectJsonStreamParser(
-            catalog if catalog is not None else self._catalogs[0],
+            self._catalogs,
             progressive_keys=self._progressive_keys,
         )

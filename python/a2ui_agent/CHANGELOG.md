@@ -1,5 +1,27 @@
 ## Unreleased
 
+- **BREAKING**: `DirectJsonParser`, `DirectJsonStreamParser` and
+  `A2uiPartConverter` take a sequence of catalogs instead of one catalog, and
+  expose them as `catalogs`. A parser holds every catalog the renderer supports
+  and checks each surface against the catalog that its start message names, or
+  a component against the catalog its `catalogId` names. `DirectJsonFormat`
+  passes all of its catalogs to its parsers, and `create_stream_parser()` uses
+  the format's catalogs without taking a `catalog` parameter (#2967). To
+  migrate, wrap a single catalog in a list: `DirectJsonParser([catalog])`.
+- A `DirectJsonStreamParser` surface can be created again after
+  `deleteSurface`. Before, the parser kept the surface ID as deleted and
+  dropped every later message for it. v0.9 and later clear it on
+  `createSurface`; v0.8, which has no `createSurface`, clears it on the next
+  message for the surface that isn't `deleteSurface` (#2967).
+- `validate_payload` takes `surface_catalog_ids`, the catalogs that earlier
+  payloads created surfaces with, and checks updates to those surfaces against
+  them, and types `payload` as `AgentToRendererMessagePayload` (#2967).
+- Rename `DirectJsonStreamParserV08` to `DirectJsonStreamParserV08Legacy`
+  (`streaming_v08_legacy.py`) and `DirectJsonStreamParserV09` to
+  `DirectJsonStreamParserModern` (`streaming_modern.py`), fix the v0.9.1 and
+  v1.0 streaming parsers applying the v0.8 path heuristic to data bindings, and
+  pass `callRendererFunction` and `agentFunctionResponse` messages through for
+  v1.0 (#2967).
 - **BREAKING**: `A2uiCatalog` is removed. Inference formats, prompt
   generators, parsers, skills, macros and the ADK toolset take and return the
   `a2ui.core` catalog itself, typed `CatalogApi`. The protocol schemas that

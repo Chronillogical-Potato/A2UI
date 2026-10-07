@@ -519,7 +519,7 @@ class ContactAgent:
                                 full_content_list.append(p.text)
                                 yield p.text
 
-            # The stream parser checks every message against a single catalog.
+            # The format's stream parser holds only the format's own catalogs.
             # When the client's inline catalogs are active too, a response's
             # surfaces may name any of them, so the response is buffered and
             # the complete payload is validated against all of them below.
@@ -527,9 +527,7 @@ class ContactAgent:
                 if session_id in self._parsers:
                     self._parsers.move_to_end(session_id)
                 else:
-                    self._parsers[session_id] = inference_format.create_stream_parser(
-                        selected_catalog
-                    )
+                    self._parsers[session_id] = inference_format.create_stream_parser()
                     if len(self._parsers) > self._max_parsers:
                         self._parsers.popitem(last=False)
 

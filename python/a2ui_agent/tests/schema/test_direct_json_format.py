@@ -57,7 +57,7 @@ def test_direct_json_format_supports_each_version(version):
 def test_direct_json_parser_methods():
     tf = DirectJsonFormat([BasicCatalog(VERSION_0_8)])
     cat = tf.catalogs[0]
-    parser = DirectJsonParser(cat)
+    parser = DirectJsonParser([cat])
 
     # 1. has_format_content
     assert parser.has_format_content("<a2ui-json>", complete=True) is False

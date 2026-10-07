@@ -14,9 +14,11 @@
 
 """Parser and compiler implementation for standard A2UI JSON schema responses."""
 
+from collections.abc import Sequence
 from typing import Any
 
 from a2ui.core import A2uiParseError, CatalogApi
+from a2ui.inference_formats.direct_json._parser_catalogs import check_parser_catalogs
 from a2ui.inference_formats.direct_json.decompiler import _DirectJsonDecompiler
 from a2ui.parser import Parser, ResponsePart, parse_and_fix
 from a2ui.schema import A2UI_CLOSE_TAG, A2UI_OPEN_TAG
@@ -74,20 +76,30 @@ class DirectJsonParser(Parser):
 
     def __init__(
         self,
-        catalog: CatalogApi,
+        catalogs: Sequence[CatalogApi],
         *,
         progressive_keys: frozenset[str] = DEFAULT_PROGRESSIVE_KEYS,
     ):
         """Initializes the DirectJsonParser.
 
         Args:
-            catalog: The catalog that payloads are validated against.
+            catalogs: The catalogs that payloads are validated against. They
+                must share a protocol version.
             progressive_keys: Keys whose string values the stream parser may
                 auto-close when cut. An empty set turns healing off.
+
+        Raises:
+            A2uiCatalogError: If no catalog is given, or the catalogs target
+                different protocol versions.
         """
-        self._catalog = catalog
+        self._catalogs = check_parser_catalogs(catalogs)
         self._progressive_keys = progressive_keys
         self._stream_parser: Any | None = None
+
+    @property
+    def catalogs(self) -> tuple[CatalogApi, ...]:
+        """The catalogs the parser holds, in the order it received them."""
+        return self._catalogs
 
     def has_format_content(self, content: str, *, complete: bool = False) -> bool:
         if complete:
@@ -111,7 +123,7 @@ class DirectJsonParser(Parser):
         """Validates and compiles raw A2UI JSON schema content.
 
         A final payload is checked with `validate_payload`, which runs it
-        through a `MessageProcessor` holding the catalog, as the stream parser
+        through a `MessageProcessor` holding the catalogs, as the stream parser
         checks its messages. A partial payload isn't checked, since it may be
         cut mid-message.
 
@@ -127,7 +139,7 @@ class DirectJsonParser(Parser):
         """
         json_data = parse_and_fix(format_content)
         if is_final:
-            validate_payload([self._catalog], json_data)
+            validate_payload(self._catalogs, json_data)
         return json_data
 
     @property
@@ -147,7 +159,7 @@ class DirectJsonParser(Parser):
 
         if not self._stream_parser:
             self._stream_parser = DirectJsonStreamParser(
-                self._catalog,
+                self._catalogs,
                 progressive_keys=self._progressive_keys,
             )
         return self._stream_parser.process_chunk(chunk)

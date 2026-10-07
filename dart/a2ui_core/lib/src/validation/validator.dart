@@ -87,6 +87,10 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
   /// not embedded and [commonTypesFor] cannot return it.
   final Map<String, Object?> commonTypesSchema;
 
+  /// Whether [validateComponent] accepts a component type [catalog] does not
+  /// declare, without checking it against any schema.
+  final bool allowUnknownElements;
+
   /// [catalog]'s component schemas with their `$ref`s inlined, on first use.
   Map<String, Schema>? _resolvedComponents;
 
@@ -98,6 +102,7 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
     required this.catalog,
     required this.protocolVersion,
     Map<String, Object?>? commonTypesSchema,
+    this.allowUnknownElements = false,
   }) : commonTypesSchema = commonTypesSchema ?? commonTypesFor(protocolVersion);
 
   /// The `common_types.json` document this package publishes for [version].
@@ -169,6 +174,9 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
   /// The caller decides which catalog the component belongs to; this checks it
   /// against the one catalog this validator holds.
   ///
+  /// A type the catalog does not declare is accepted unchecked when
+  /// [allowUnknownElements] is true.
+  ///
   /// Throws [A2uiValidationError] if the component names no type, names one
   /// the catalog does not declare, or does not match its schema.
   void validateComponent(Map<String, Object?> component) {
@@ -181,6 +189,7 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
     }
     final Schema? schema = _resolvedComponentSchemas[type];
     if (schema == null) {
+      if (allowUnknownElements) return;
       throw A2uiValidationError(
         "Catalog '${catalog.id}' declares no component named '$type'.",
         details: component,
@@ -206,7 +215,8 @@ class PayloadValidator<C extends ComponentApi, F extends FunctionApi> {
             for (final MapEntry<String, Object?> entry in component.entries)
               if (entry.key != 'id' &&
                   entry.key != 'component' &&
-                  entry.key != 'catalogId')
+                  entry.key != 'catalogId' &&
+                  entry.key != 'metadata')
                 entry.key: entry.value,
           };
 

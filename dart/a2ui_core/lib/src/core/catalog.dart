@@ -274,13 +274,16 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
   /// and checked against version-specific function capabilities (for example,
   /// `returnType: 'validationResult'` requires `1.0` or later; an omitted
   /// `protocolVersion` defaults to `'0.9'`). A surface also checks
-  /// [protocolVersion] against its own version.
+  /// [protocolVersion] against its own version. When the document declares
+  /// none, as documents written before v1.0 do not, [protocolVersion] is
+  /// used instead.
   ///
   /// Throws [A2uiCatalogError] if the document is malformed or conflicts with
   /// [expectedCatalogId].
   static CatalogApi fromJson(
     Map<String, Object?> json, {
     String? expectedCatalogId,
+    String? protocolVersion,
   }) {
     final Object? rawId = json['catalogId'];
     if (rawId is! String || rawId.isEmpty) {
@@ -315,7 +318,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
         catalogId: rawId,
       );
     }
-    final protocolVersion = rawVersion as String?;
+    final String? declaredVersion = rawVersion as String? ?? protocolVersion;
 
     return CatalogApi(
       id: rawId,
@@ -334,7 +337,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
       schemaId: document[r'$id'] as String?,
       title: document['title'] as String?,
       description: document['description'] as String?,
-      protocolVersion: protocolVersion,
+      protocolVersion: declaredVersion,
       instructions: document['instructions'] as String?,
     );
   }
@@ -778,7 +781,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
     };
     final serializedFunctions = <String, Object?>{
       for (final MapEntry<String, F> entry in functions.entries)
-        entry.key: _serializeFunction(entry.key, entry.value),
+        entry.key: _serializeFunction(entry.key, entry.value, _callKey),
     };
 
     final defs = <String, Object?>{
@@ -831,9 +834,20 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
     };
   }
 
+  /// The key a function call names its function under: the reserved `@call`
+  /// from protocol `1.0`, and `call` before it or when [protocolVersion] is
+  /// unset.
+  String get _callKey {
+    final String? version = protocolVersion;
+    return version != null && compareVersions(version, 'v1.0') >= 0
+        ? '@call'
+        : 'call';
+  }
+
   static Map<String, Object?> _serializeFunction(
     String name,
     FunctionApi fn,
+    String callKey,
   ) {
     final Object? argsValue = _deepCopyValue(fn.argumentSchema.value);
     _restoreRefs(argsValue);
@@ -841,7 +855,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
       'type': 'object',
       if (fn.description != null) 'description': fn.description,
       'properties': <String, Object?>{
-        'call': <String, Object?>{'const': name},
+        callKey: <String, Object?>{'const': name},
         'args': argsValue,
         'returnType': <String, Object?>{
           'const': fn.returnType.jsonValue,
@@ -850,7 +864,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
       // A call to a function without required parameters may omit `args`
       // altogether.
       'required': <Object?>[
-        'call',
+        callKey,
         if (_hasRequiredParameters(fn.argumentSchema)) 'args',
       ],
       'unevaluatedProperties': false,

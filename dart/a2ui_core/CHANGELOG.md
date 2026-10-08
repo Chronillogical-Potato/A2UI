@@ -2,6 +2,30 @@
 
 ## Unreleased
 
+- Added `MessageProcessor.getRendererCapabilities(CapabilitiesOptions)`,
+  which returns an `A2uiRendererCapabilities` with one entry per requested
+  version and raises `A2uiValidationError` for an empty version list. Inline
+  catalogs use the legacy shape below v1.0 and a copy of the standalone
+  catalog schema document from v1.0.
+- **Breaking:** `A2uiVersionCapabilities.toJson` takes a required `version`
+  and shapes inline catalogs for it; `A2uiRendererCapabilities.toJson` and
+  `getRendererCapabilities` use the same code.
+- **Behavior change:** Legacy inline catalogs are derived from
+  `Catalog.catalogSchema`, so a component's properties and required list
+  match the catalog document (which merges `allOf` members). `id` and
+  `component` are left to the `ComponentCommon` envelope, bundled common-type
+  refs become `common_types.json#/$defs/...` refs again, other local refs are
+  inlined when they resolve and dropped otherwise, and function entries carry
+  `description`.
+- **Breaking:** Removed `MessageProcessor.getClientCapabilities` and
+  `getClientDataModel`. Use
+  `getRendererCapabilities(CapabilitiesOptions(versions: [A2uiProtocolVersion.v0_9], includeInlineCatalogs: ...)).toJson()`
+  and `getRendererDataModel()`.
+- **Behavior change:** `getRendererDataModel` takes an optional `version`.
+  With one, it returns only the surfaces compatible with that version. Without
+  one, it reports the version the surfaces share, defaults to `v1.0` when none
+  records a version, and raises `A2uiValidationError` when the surfaces record
+  different versions. It returns `Map<String, Object?>?`.
 - Added the RPC layer: `RpcHandler` sends `callAgentFunction` messages
   through an `OutboundMessageListener` and settles them from
   `agentFunctionResponse`, and answers `callRendererFunction` with a
@@ -393,7 +417,6 @@
   entry and tracks nested bindings reactively; previously a container holding
   bindings (such as a function argument list or a nested `{path}` value) was
   passed through as a static literal.
-  > > > > > > > upstream/main
 
 ## 0.2.2
 

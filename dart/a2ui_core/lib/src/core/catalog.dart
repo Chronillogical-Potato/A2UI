@@ -20,6 +20,7 @@ import '../primitives/cancellation.dart';
 import '../primitives/errors.dart';
 import '../primitives/reactivity.dart';
 import '../primitives/reference_schema.dart';
+import '../primitives/semver.dart';
 import '../validation/common_types.g.dart';
 import '../validation/schema_resolution.dart';
 import 'contexts.dart';
@@ -146,12 +147,24 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
   /// The document's `description`, when it declares one.
   final String? description;
 
-  /// The document's `protocolVersion`, when it declares one.
+  /// The A2UI protocol version this catalog is written for, such as `'v1.0'`.
+  ///
+  /// A surface accepts only catalogs whose version is compatible with its
+  /// own (see [isCatalogVersionCompatible]). Null means unversioned, which
+  /// predates the field and so is pre-v1.0: a v0.9 or v0.9.1 surface accepts
+  /// the catalog, and a v1.0 or later surface rejects it.
   final String? protocolVersion;
+
+  /// Markdown design guidelines for this catalog, which agents add to the
+  /// prompt alongside its components and functions.
+  final String? instructions;
 
   final Map<String, C> components;
   final Map<String, F> functions;
   final Schema? themeSchema;
+
+  /// The component name the protocol reserves for the surface itself.
+  static const String reservedComponentName = 'Surface';
 
   /// Which properties of each component type reference other components.
   ///
@@ -167,6 +180,12 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
     document: catalogSchema,
   );
 
+  /// Throws [A2uiCatalogError] when two components or two functions share a
+  /// name, when a component is named [reservedComponentName], when a
+  /// function name starts with `@`, which the protocol reserves for its own
+  /// functions, or when a function declares [A2uiReturnType.validationResult]
+  /// on a catalog whose effective protocol version is below `1.0` (an omitted
+  /// [protocolVersion] defaults to `'0.9'`).
   Catalog({
     required this.id,
     required List<C> components,
@@ -176,8 +195,74 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
     this.title,
     this.description,
     this.protocolVersion,
-  })  : components = {for (final c in components) c.name: c},
-        functions = {for (final f in functions) f.name: f};
+    this.instructions,
+  })  : components = _indexComponents(id, components),
+        functions = _indexFunctions(id, functions, protocolVersion);
+
+  static Map<String, T> _indexComponents<T extends ComponentApi>(
+    String catalogId,
+    List<T> items,
+  ) {
+    final byName = <String, T>{};
+    for (final item in items) {
+      if (item.name == reservedComponentName) {
+        throw A2uiCatalogError(
+          "Catalog '$catalogId' declares a component named "
+          "'$reservedComponentName', which is reserved.",
+          catalogId: catalogId,
+        );
+      }
+      _addUnique(byName, catalogId, 'component', item.name, item);
+    }
+    return byName;
+  }
+
+  static Map<String, T> _indexFunctions<T extends FunctionApi>(
+    String catalogId,
+    List<T> items,
+    String? protocolVersion,
+  ) {
+    final String effectiveVersion = protocolVersion ?? '0.9';
+    final bool allowsValidationResult =
+        compareVersions(effectiveVersion, '1.0') >= 0;
+    final byName = <String, T>{};
+    for (final item in items) {
+      if (item.name.startsWith('@')) {
+        throw A2uiCatalogError(
+          "Catalog '$catalogId' declares a function named '${item.name}'; "
+          "names starting with '@' are reserved.",
+          catalogId: catalogId,
+        );
+      }
+      if (!allowsValidationResult &&
+          item.returnType == A2uiReturnType.validationResult) {
+        throw A2uiCatalogError(
+          "Function '${item.name}' declares returnType 'validationResult', "
+          'which protocol $effectiveVersion does not define; declare '
+          'protocolVersion 1.0 or later.',
+          catalogId: catalogId,
+        );
+      }
+      _addUnique(byName, catalogId, 'function', item.name, item);
+    }
+    return byName;
+  }
+
+  static void _addUnique<T>(
+    Map<String, T> byName,
+    String catalogId,
+    String kind,
+    String name,
+    T item,
+  ) {
+    if (byName.containsKey(name)) {
+      throw A2uiCatalogError(
+        "Catalog '$catalogId' declares more than one $kind named '$name'.",
+        catalogId: catalogId,
+      );
+    }
+    byName[name] = item;
+  }
 
   /// Parses a catalog document into a schema-only [Catalog].
   ///
@@ -185,9 +270,11 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
   /// published catalog documents, and the list of definitions used by inline
   /// catalogs in renderer capabilities.
   ///
-  /// A catalog document is version-agnostic: any `protocolVersion` it
-  /// declares is recorded in [protocolVersion] rather than checked against this
-  /// SDK.
+  /// A `protocolVersion` the document declares is kept in [protocolVersion]
+  /// and checked against version-specific function capabilities (for example,
+  /// `returnType: 'validationResult'` requires `1.0` or later; an omitted
+  /// `protocolVersion` defaults to `'0.9'`). A surface also checks
+  /// [protocolVersion] against its own version.
   ///
   /// Throws [A2uiCatalogError] if the document is malformed or conflicts with
   /// [expectedCatalogId].
@@ -248,6 +335,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
       title: document['title'] as String?,
       description: document['description'] as String?,
       protocolVersion: protocolVersion,
+      instructions: document['instructions'] as String?,
     );
   }
 
@@ -736,6 +824,7 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
       if (description != null) 'description': description,
       if (protocolVersion != null) 'protocolVersion': protocolVersion,
       'catalogId': id,
+      if (instructions != null) 'instructions': instructions,
       'components': serializedComponents,
       if (serializedFunctions.isNotEmpty) 'functions': serializedFunctions,
       r'$defs': defs,
@@ -758,7 +847,12 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
           'const': fn.returnType.jsonValue,
         },
       },
-      'required': <Object?>['call', 'args'],
+      // A call to a function without required parameters may omit `args`
+      // altogether.
+      'required': <Object?>[
+        'call',
+        if (_hasRequiredParameters(fn.argumentSchema)) 'args',
+      ],
       'unevaluatedProperties': false,
     };
   }
@@ -894,7 +988,13 @@ class Catalog<C extends ComponentApi, F extends FunctionApi> {
         title: title,
         description: description,
         protocolVersion: protocolVersion ?? this.protocolVersion,
+        instructions: instructions,
       );
+
+  static bool _hasRequiredParameters(Schema schema) {
+    final Object? required = schema.value['required'];
+    return required is List && required.isNotEmpty;
+  }
 
   static Object? _deepCopyValue(Object? value) {
     if (value is Map) {

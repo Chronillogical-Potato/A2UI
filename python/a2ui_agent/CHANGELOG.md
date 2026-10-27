@@ -31,6 +31,16 @@
   JSON block, use `DirectJsonParser(catalogs).compile(text)` or
   `A2uiRequestProcessor.parse_response`.
   [#3632](https://github.com/a2ui-project/a2ui/pull/3632)
+- **BREAKING CHANGE**: Cross-catalog `$ref` resolution across peer catalogs is
+  removed. `resolve_catalogs`, `validate_payload`, `RendererState`, and the
+  Direct JSON and Express formats no longer link the catalogs they are given,
+  so a catalog's `$ref`s resolve only against its own document and the
+  protocol's `common_types.json`. Loading a v1.0 catalog with a `$ref` to any
+  other document raises `A2uiCatalogError`. Recommended migration: bundle
+  referenced components, properties and functions into each catalog so it is
+  standalone.
+  [#3232](https://github.com/a2ui-project/a2ui/issues/3232),
+  [#3575](https://github.com/a2ui-project/a2ui/pull/3575)
 - The Express compiler keeps a map literal as written, quoted keys or not, when
   one of its keys shares a name with an Express construct (`variable`, `path`,
   `call`, `check`, `skipped`); before, such a map was read as a variable
@@ -58,6 +68,11 @@
   written as a map literal rather than as a data binding or function call. An
   object with the binding key beside other keys, or an `event` or
   `functionCall` key whose value is not an object, is also data.
+- The Express, Elemental and Atom prompts and compilers read a component
+  property's enum from the component's own definition when it also inherits
+  the property through `allOf`, and list `checks` once, last, for a checkable
+  component that also declares `checks` itself
+  ([#3575](https://github.com/a2ui-project/a2ui/pull/3575)).
 - Add `A2UI_RENDERER_CAPABILITIES_KEY` (`"a2uiRendererCapabilities"`) to
   `a2ui.constants`, the message metadata key under which the v1.0 A2A
   extension sends the renderer capabilities. v0.8 and v0.9 use

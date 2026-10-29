@@ -100,7 +100,7 @@ In the app, try these prompts:
 
 ```json
 {
-  "version": "v1.0",
+  "version": "1.0",
   "createSurface": {
     "surfaceId": "restaurant-results",
     "catalogId": "https://a2ui.org/specification/v1_0/catalogs/basic/catalog.json"
